@@ -1,6 +1,11 @@
 from __future__ import annotations
+import warnings
 import numpy as np
 from sklearn.linear_model import Ridge
+
+# LightGBM records feature names at fit time; predicting on a nameless ndarray triggers a
+# cosmetic sklearn warning. Predictions are positional and correct — silence the noise.
+warnings.filterwarnings("ignore", message="X does not have valid feature names")
 
 # NOTE: `performance` is ordinal in {0.0, 0.5, 1.0}, and the metric rewards
 # mean(performance). We therefore predict EXPECTED performance via regression
