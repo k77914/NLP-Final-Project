@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+Output/
+*.joblib
+*.npy
+*.npz
+dataset/*.csv
+dataset.zip
+.idea/
+.venv/
+~$*
+*.tmp

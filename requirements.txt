@@ -1,0 +1,10 @@
+pandas==2.2.2
+numpy>=1.26.4,<2.1
+scikit-learn>=1.4
+scipy
+lightgbm
+joblib
+tqdm
+pytest
+# Colab/A100 only (not needed for Phase-0 unit tests):
+# transformers>=4.48.0  sentence-transformers>=2.7.0  accelerate  vllm
