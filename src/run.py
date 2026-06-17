@@ -75,6 +75,53 @@ def build_feature_blocks(cfg, train, test, extra_tr=None, extra_te=None):
     return dense_tr, dense_te, sparse_tr, sparse_te
 
 
+def _add_calibrated(oof_list, test_list, names, oof, test, perf, name):
+    co, ct = er.isotonic_calibrate(oof, perf, test)
+    oof_list.append(co); test_list.append(ct); names.append(name)
+
+
+def classical_learners(cfg, train, test, perf, folds, extra_tr=None, extra_te=None):
+    """Linear (Ridge) + LightGBM base learners, calibrated. Reuses cache when present,
+    else computes (so any phase can call this and get the full classical ensemble)."""
+    uc = not cfg.smoke
+    tag = len(train)
+    paths = [cfg.cache_dir / f"{p}_{tag}.npy" for p in ("lin_oof", "lin_test", "lgbm_oof", "lgbm_test")]
+    if uc and all(p.exists() for p in paths):
+        _log("all classical caches present; skipping feature build")
+        dense_tr = dense_te = sparse_tr = sparse_te = None
+    else:
+        dense_tr, dense_te, sparse_tr, sparse_te = build_feature_blocks(cfg, train, test, extra_tr, extra_te)
+
+    oof_list, test_list, names = [], [], []
+    _log("linear (Ridge) base learner...")
+    t = time.time()
+    lin_oof = _cache_np(cfg.cache_dir / f"lin_oof_{tag}.npy",
+                        lambda: mc.linear_oof(sparse_tr, perf, folds, cfg.seed, verbose=True), uc)
+    lin_test = _cache_np(cfg.cache_dir / f"lin_test_{tag}.npy",
+                         lambda: mc.linear_full(sparse_tr, perf, sparse_te, cfg.seed, verbose=True), uc)
+    _log(f"linear ready ({time.time() - t:.0f}s)")
+    _add_calibrated(oof_list, test_list, names, lin_oof, lin_test, perf, "linear")
+
+    try:
+        import lightgbm  # noqa: F401
+        have_lgbm = True
+    except Exception as e:
+        print("LightGBM unavailable -> linear-only:", repr(e), flush=True)
+        have_lgbm = False
+    if have_lgbm:
+        _log("LightGBM base learner (66 fits)...")
+        t = time.time()
+        g_oof = _cache_np(cfg.cache_dir / f"lgbm_oof_{tag}.npy",
+            lambda: mc.lgbm_oof(dense_tr, perf, folds, cfg.lgbm_estimators, cfg.lgbm_lr,
+                                cfg.lgbm_leaves, cfg.lgbm_min_child, cfg.seed, verbose=True), uc)
+        g_test = _cache_np(cfg.cache_dir / f"lgbm_test_{tag}.npy",
+            lambda: mc.lgbm_full(dense_tr, perf, dense_te, cfg.lgbm_estimators, cfg.lgbm_lr,
+                                 cfg.lgbm_leaves, cfg.lgbm_min_child, cfg.seed, verbose=True), uc)
+        _log(f"lgbm ready ({time.time() - t:.0f}s)")
+        _add_calibrated(oof_list, test_list, names, g_oof, g_test, perf, "lgbm")
+    return oof_list, test_list, names
+
+
 def route_and_submit(cfg, oof_list, test_list, perf, cost, cost_const, denom,
                      test, sample, names):
     _log("tuning ensemble weights...")
@@ -106,13 +153,7 @@ def route_and_submit(cfg, oof_list, test_list, perf, cost, cost_const, denom,
             "oof_blend": oof_blend, "test_blend": test_blend}
 
 
-def _add_calibrated(oof_list, test_list, names, oof, test, perf, name):
-    co, ct = er.isotonic_calibrate(oof, perf, test)
-    oof_list.append(co); test_list.append(ct); names.append(name)
-
-
-def run_phase0(cfg: CFG):
-    seed_everything(cfg.seed)
+def _prep(cfg):
     _log("loading data...")
     train, test, sample = data.load_data(cfg)
     _log(f"train={train.shape} test={test.shape}")
@@ -120,65 +161,25 @@ def run_phase0(cfg: CFG):
     cost_const = data.cost_constants(cost)
     denom = cost_denominator(cost)
     folds = cv.get_folds(cfg, perf, train["query"])
-    dense_tr, dense_te, sparse_tr, sparse_te = build_feature_blocks(cfg, train, test)
-    uc = not cfg.smoke
-    tag = len(train)
+    return train, test, sample, perf, cost, cost_const, denom, folds
 
-    oof_list, test_list, names = [], [], []
-    _log("training linear (Ridge) base learner...")
-    t = time.time()
-    lin_oof = _cache_np(cfg.cache_dir / f"lin_oof_{tag}.npy",
-                        lambda: mc.linear_oof(sparse_tr, perf, folds, cfg.seed, verbose=True), uc)
-    lin_test = _cache_np(cfg.cache_dir / f"lin_test_{tag}.npy",
-                         lambda: mc.linear_full(sparse_tr, perf, sparse_te, cfg.seed, verbose=True), uc)
-    _log(f"linear done ({time.time() - t:.0f}s)")
-    _add_calibrated(oof_list, test_list, names, lin_oof, lin_test, perf, "linear")
 
-    try:
-        import lightgbm  # noqa: F401
-        have_lgbm = True
-    except Exception as e:
-        print("LightGBM unavailable -> linear-only Phase 0:", repr(e), flush=True)
-        have_lgbm = False
-    if have_lgbm:
-        _log("training LightGBM base learner (the slow part: 66 fits)...")
-        t = time.time()
-        g_oof = _cache_np(cfg.cache_dir / f"lgbm_oof_{tag}.npy",
-            lambda: mc.lgbm_oof(dense_tr, perf, folds, cfg.lgbm_estimators, cfg.lgbm_lr,
-                                cfg.lgbm_leaves, cfg.lgbm_min_child, cfg.seed, verbose=True), uc)
-        g_test = _cache_np(cfg.cache_dir / f"lgbm_test_{tag}.npy",
-            lambda: mc.lgbm_full(dense_tr, perf, dense_te, cfg.lgbm_estimators, cfg.lgbm_lr,
-                                 cfg.lgbm_leaves, cfg.lgbm_min_child, cfg.seed, verbose=True), uc)
-        _log(f"lgbm done ({time.time() - t:.0f}s)")
-        _add_calibrated(oof_list, test_list, names, g_oof, g_test, perf, "lgbm")
-
+def run_phase0(cfg: CFG):
+    seed_everything(cfg.seed)
+    train, test, sample, perf, cost, cost_const, denom, folds = _prep(cfg)
+    oof_list, test_list, names = classical_learners(cfg, train, test, perf, folds)
     return route_and_submit(cfg, oof_list, test_list, perf, cost, cost_const, denom,
                             test, sample, names)
 
 
 def run_phase1(cfg: CFG):
-    """Phase 1: add the fine-tuned ModernBERT encoder, ensembled with cached Phase-0 learners."""
+    """Phase 1: add the fine-tuned ModernBERT encoder, ensembled with the classical learners."""
     from . import models_encoder as me
     seed_everything(cfg.seed)
-    _log("loading data...")
-    train, test, sample = data.load_data(cfg)
-    perf, cost = data.build_targets(train)
-    cost_const = data.cost_constants(cost)
-    denom = cost_denominator(cost)
-    folds = cv.get_folds(cfg, perf, train["query"])
-    tag = len(train)
+    train, test, sample, perf, cost, cost_const, denom, folds = _prep(cfg)
+    oof_list, test_list, names = classical_learners(cfg, train, test, perf, folds)
+
     uc = not cfg.smoke
-
-    oof_list, test_list, names = [], [], []
-    for nm, a, b in [("linear", f"lin_oof_{tag}.npy", f"lin_test_{tag}.npy"),
-                     ("lgbm", f"lgbm_oof_{tag}.npy", f"lgbm_test_{tag}.npy")]:
-        pa, pb = cfg.cache_dir / a, cfg.cache_dir / b
-        if pa.exists() and pb.exists():
-            _add_calibrated(oof_list, test_list, names, np.load(pa), np.load(pb), perf, nm)
-            _log(f"loaded cached {nm}")
-        else:
-            _log(f"WARNING: {nm} cache missing ({a}); run Phase 0 first for the full ensemble")
-
     etag = me.cache_tag(cfg, len(train))
     enc_oof_p = cfg.cache_dir / f"enc_oof_{etag}.npy"
     enc_test_p = cfg.cache_dir / f"enc_test_{etag}.npy"
