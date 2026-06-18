@@ -130,6 +130,89 @@ def select_policy(p_hat, perf, cost, cost_const, denom, k_idx, margins=None):
     return {**cands, "best_margin": best_m, "best_policy": max(cands, key=cands.get)}
 
 
+def crossfit_policy_predictions(oof_list, perf, cost, cost_const, denom, folds, k_idx,
+                                weight_step=0.5, margins=None):
+    """Cross-fit policy selection on already-OOF base predictions.
+
+    This removes calibration/weight/margin selection leakage from each evaluated
+    fold. It is a policy-level estimate; a fully nested estimate would also retrain
+    every base learner inside each outer fold.
+    """
+    oof_list = [np.asarray(o, np.float64) for o in oof_list]
+    perf = np.asarray(perf)
+    cost = np.asarray(cost)
+    n = len(perf)
+    pred_idx = np.empty(n, dtype=np.int64)
+    details = []
+
+    for outer_fold, (tr, va) in enumerate(folds):
+        tr = np.asarray(tr, np.int64)
+        va = np.asarray(va, np.int64)
+        local_pos = np.full(n, -1, dtype=np.int64)
+        local_pos[tr] = np.arange(len(tr))
+
+        inner_calibrated = []
+        outer_val_calibrated = []
+        for raw_oof in oof_list:
+            inner_oof = np.zeros((len(tr), raw_oof.shape[1]), dtype=np.float64)
+            for inner_fold, (_, inner_va_all) in enumerate(folds):
+                if inner_fold == outer_fold:
+                    continue
+                inner_va = np.intersect1d(tr, inner_va_all, assume_unique=False)
+                inner_tr = np.setdiff1d(tr, inner_va, assume_unique=False)
+                _, calibrated = isotonic_calibrate(
+                    raw_oof[inner_tr], perf[inner_tr], raw_oof[inner_va]
+                )
+                inner_oof[local_pos[inner_va]] = calibrated
+
+            _, calibrated_va = isotonic_calibrate(
+                raw_oof[tr], perf[tr], raw_oof[va]
+            )
+            inner_calibrated.append(inner_oof)
+            outer_val_calibrated.append(calibrated_va)
+
+        if len(inner_calibrated) == 1:
+            weights = np.array([1.0])
+        else:
+            weights, _ = tune_weights(
+                inner_calibrated, perf[tr], cost[tr], cost_const, denom,
+                step=weight_step,
+            )
+        train_blend = weighted_average(inner_calibrated, weights)
+        val_blend = weighted_average(outer_val_calibrated, weights)
+        selected = select_policy(
+            train_blend, perf[tr], cost[tr], cost_const, denom, k_idx,
+            margins=margins,
+        )
+        policy = selected["best_policy"]
+        margin = selected["best_margin"]
+
+        if policy == "always_K":
+            fold_pred = np.full(len(va), k_idx, dtype=np.int64)
+        elif policy == "k_margin":
+            fold_pred = route_k_anchored(
+                val_blend, cost_const, denom, k_idx, margin
+            )
+        else:
+            fold_pred = route(val_blend, cost_const, denom)
+        pred_idx[va] = fold_pred
+
+        details.append({
+            "fold": outer_fold,
+            "weights": weights.tolist(),
+            "policy": policy,
+            "margin": margin,
+            "reward": route_reward(fold_pred, perf[va], cost[va], denom),
+            "always_K_reward": route_reward(
+                np.full(len(va), k_idx), perf[va], cost[va], denom
+            ),
+            "n_rows": len(va),
+            "n_leave_K": int((fold_pred != k_idx).sum()),
+        })
+
+    return pred_idx, details
+
+
 def write_submission(path, test_ids, pred_idx, sample_df) -> Path:
     path = Path(path)
     pred_model = [MODEL_NAMES[int(i)] for i in pred_idx]

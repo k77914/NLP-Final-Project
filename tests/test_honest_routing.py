@@ -1,5 +1,5 @@
 import numpy as np
-from src import ensemble_routing as er
+from src import ensemble_routing as er, cv
 
 
 def test_route_k_anchored_margin_extremes():
@@ -33,3 +33,37 @@ def test_selected_policy_never_below_always_k():
     best = max(sel["always_K"], sel["argmax"], sel["k_margin"])
     assert best >= sel["always_K"] - 1e-9
     assert "best_margin" in sel and "best_policy" in sel
+
+
+def test_crossfit_policy_predictions_partition_and_details(synthetic_train):
+    letters = list("ABCDEFGHIJK")
+    perf = synthetic_train[
+        [f"Model_{x}_performance" for x in letters]
+    ].to_numpy(np.float64)
+    cost = synthetic_train[
+        [f"Model_{x}_cost" for x in letters]
+    ].to_numpy(np.float64)
+    folds = cv.make_folds_from_arrays(
+        perf, synthetic_train["query"], n_splits=5, seed=42
+    )
+    rng = np.random.default_rng(7)
+    oof_list = [
+        np.clip(perf * 0.6 + rng.normal(0, 0.2, perf.shape), 0, 1),
+        np.clip(perf * 0.4 + rng.normal(0, 0.3, perf.shape), 0, 1),
+    ]
+    pred, details = er.crossfit_policy_predictions(
+        oof_list=oof_list,
+        perf=perf,
+        cost=cost,
+        cost_const=cost.mean(0),
+        denom=cost.max(1).mean(),
+        folds=folds,
+        k_idx=10,
+        weight_step=0.5,
+        margins=np.array([0.0, 0.05]),
+    )
+    assert pred.shape == (len(perf),)
+    assert ((pred >= 0) & (pred < 11)).all()
+    assert len(details) == 5
+    assert sum(d["n_rows"] for d in details) == len(perf)
+    assert all(d["policy"] in {"always_K", "argmax", "k_margin"} for d in details)

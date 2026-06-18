@@ -138,20 +138,30 @@ def route_and_submit(cfg, oof_list, test_list, perf, cost, cost_const, denom, fo
     blend_oof = er.weighted_average(cal_oof_list, w)
     blend_test = er.weighted_average(cal_test_list, w)
 
-    # Conservative policy selection (always-K is a candidate -> never below baseline).
+    # Select the final full-data policy, then estimate it by re-selecting calibration,
+    # weights, and routing policy without each evaluated outer fold.
     sel = er.select_policy(blend_oof, perf, cost, cost_const, denom, k_idx)
     policy, margin = sel["best_policy"], sel["best_margin"]
+    honest_idx, fold_details = er.crossfit_policy_predictions(
+        oof_list, perf, cost, cost_const, denom, folds, k_idx, weight_step=0.5
+    )
+    honest = route_reward(honest_idx, perf, cost, denom)
     _log(f"weights={list(np.round(w, 2))} | honest: always_K={sel['always_K']:.5f} "
          f"argmax={sel['argmax']:.5f} k_margin={sel['k_margin']:.5f}(m={margin:.3f}) -> {policy}")
+    _log(f"policy-crossfit CV reward={honest:.5f}")
 
     rows = [{"method": "always_K", "oof_reward": sel["always_K"]}]
     for nm, co in zip(names, cal_oof_list):
         rows.append({"method": f"{nm}_solo",
                      "oof_reward": route_reward(er.route(co, cost_const, denom), perf, cost, denom)})
     rows.append({"method": f"blend_argmax_w={list(np.round(w, 2))}", "oof_reward": sel["argmax"]})
-    rows.append({"method": f"blend_k_margin(m={margin:.3f})", "oof_reward": sel["k_margin"]})
+    rows.append({"method": "policy_crossfit_estimate", "oof_reward": honest})
+    rows.append({"method": f"selection_fit_k_margin(m={margin:.3f})", "oof_reward": sel["k_margin"]})
     comp = pd.DataFrame(rows).sort_values("oof_reward", ascending=False)
     comp.to_csv(cfg.out_dir / "model_comparison.csv", index=False)
+    pd.DataFrame(fold_details).to_csv(
+        cfg.out_dir / "policy_crossfit_folds.csv", index=False
+    )
     print(comp.to_string(index=False))
 
     if policy == "always_K":
@@ -162,9 +172,11 @@ def route_and_submit(cfg, oof_list, test_list, perf, cost, cost_const, denom, fo
         test_idx = er.route(blend_test, cost_const, denom)
     er.write_submission(cfg.out_dir / "submission.csv", test["ID"].to_numpy(), test_idx, sample)
 
-    honest = max(sel["always_K"], sel["argmax"], sel["k_margin"])
     dist = pd.Series([MODEL_NAMES[i] for i in test_idx]).value_counts()
-    print(f"\nHONEST CV reward (policy '{policy}'): {honest:.5f}  [always_K {sel['always_K']:.5f}]")
+    print(f"\nPolicy-crossfit CV reward: {honest:.5f}  "
+          f"[always_K {sel['always_K']:.5f}]")
+    print(f"Final full-data policy: {policy}, margin={margin:.3f}, "
+          f"weights={list(np.round(w, 2))}")
     print("submission model distribution:\n", dist.to_string())
     return {"honest_reward": honest, "policy": policy, "margin": margin, "weights": w.tolist(),
             "blend_oof": blend_oof, "blend_test": blend_test, "k_idx": k_idx}
