@@ -53,6 +53,7 @@ class CFG:
     llm_k_samples: int = 6
     llm_max_new_tokens: int = 1024
     llm_temperature: float = 0.8
+    hf_batch_size: int = 16  # batch size for the transformers (non-vLLM) generation backend
 
     @property
     def data_dir(self) -> Path:

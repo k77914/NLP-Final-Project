@@ -88,34 +88,88 @@ def _trim(q: str, max_chars: int = 6000) -> str:
     return q if len(q) <= max_chars else q[:4000] + "\n[...]\n" + q[-1500:]
 
 
-def compute_llm_features(cfg, df: pd.DataFrame, split: str) -> pd.DataFrame:
-    """Drive vLLM to produce difficulty features for each query (GPU). Cached to parquet."""
-    cache = cfg.cache_dir / f"llm_feats_{split}_{len(df)}.parquet"
-    if cache.exists():
-        return pd.read_parquet(cache)
+def _features_frame(sc_lists, judge_texts) -> pd.DataFrame:
+    """Build the feature DataFrame from per-query sample lists + judge text (backend-agnostic)."""
+    rows = []
+    for samples, jt in zip(sc_lists, judge_texts):
+        answers = [extract_answer(t) for t in samples]
+        lengths = [len(t.split()) for t in samples]
+        refusals = [1 if _REFUSE_RE.search(t) else 0 for t in samples]
+        feat = self_consistency_features(answers, lengths, refusals)
+        d, p = parse_judge(jt)
+        feat["judge_difficulty"] = d
+        feat["judge_p_solvable"] = p
+        rows.append(feat)
+    return pd.DataFrame(rows)[FEATURE_COLS].astype(np.float32)
+
+
+def _compute_vllm(cfg, df):
     from vllm import LLM, SamplingParams
     llm = LLM(model=cfg.llm_id, dtype="bfloat16", gpu_memory_utilization=0.9,
               max_model_len=4096, trust_remote_code=True)
     queries = [_trim(q) for q in df["query"].fillna("").astype(str).tolist()]
-    sc_params = SamplingParams(n=cfg.llm_k_samples, temperature=cfg.llm_temperature,
-                               top_p=0.95, max_tokens=cfg.llm_max_new_tokens)
-    judge_params = SamplingParams(n=1, temperature=0.0, max_tokens=64)
-    sc_out = llm.generate([SOLVE_PROMPT.format(q=q) for q in queries], sc_params)
-    judge_out = llm.generate([JUDGE_PROMPT.format(q=q) for q in queries], judge_params)
+    sc = llm.generate([SOLVE_PROMPT.format(q=q) for q in queries],
+                      SamplingParams(n=cfg.llm_k_samples, temperature=cfg.llm_temperature,
+                                     top_p=0.95, max_tokens=cfg.llm_max_new_tokens))
+    jd = llm.generate([JUDGE_PROMPT.format(q=q) for q in queries],
+                      SamplingParams(n=1, temperature=0.0, max_tokens=64))
+    sc_lists = [[o.text for o in s.outputs] for s in sc]
+    judge_texts = [j.outputs[0].text for j in jd]
+    return sc_lists, judge_texts
 
-    rows = []
-    for s, j in zip(sc_out, judge_out):
-        answers, lengths, refusals = [], [], []
-        for o in s.outputs:
-            t = o.text
-            answers.append(extract_answer(t))
-            lengths.append(len(t.split()))
-            refusals.append(1 if _REFUSE_RE.search(t) else 0)
-        feat = self_consistency_features(answers, lengths, refusals)
-        d, p = parse_judge(j.outputs[0].text)
-        feat["judge_difficulty"] = d
-        feat["judge_p_solvable"] = p
-        rows.append(feat)
-    out = pd.DataFrame(rows)[FEATURE_COLS].astype(np.float32)
+
+def _hf_generate(model, tok, prompts, n, max_new, do_sample, temperature, bs):
+    """Batched left-padded generation; returns a list (per prompt) of n decoded completions."""
+    import torch
+    out_lists = []
+    for i in range(0, len(prompts), bs):
+        chunk = prompts[i:i + bs]
+        msgs = [tok.apply_chat_template([{"role": "user", "content": p}],
+                                        tokenize=False, add_generation_prompt=True) for p in chunk]
+        enc = tok(msgs, return_tensors="pt", padding=True, truncation=True,
+                  max_length=2048).to(model.device)
+        kwargs = dict(max_new_tokens=max_new, num_return_sequences=n, pad_token_id=tok.pad_token_id)
+        if do_sample:
+            kwargs.update(do_sample=True, temperature=temperature, top_p=0.95)
+        else:
+            kwargs.update(do_sample=False)
+        with torch.no_grad():
+            gen = model.generate(**enc, **kwargs)
+        new = gen[:, enc["input_ids"].shape[1]:]
+        texts = tok.batch_decode(new, skip_special_tokens=True)
+        for j in range(len(chunk)):
+            out_lists.append(texts[j * n:(j + 1) * n])
+        print(f"  hf gen {min(i + bs, len(prompts))}/{len(prompts)}", flush=True)
+    return out_lists
+
+
+def _compute_hf(cfg, df):
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    tok = AutoTokenizer.from_pretrained(cfg.llm_id)
+    tok.padding_side = "left"
+    if tok.pad_token is None:
+        tok.pad_token = tok.eos_token
+    model = AutoModelForCausalLM.from_pretrained(cfg.llm_id, torch_dtype=torch.bfloat16,
+                                                 device_map="auto")
+    model.eval()
+    queries = [_trim(q) for q in df["query"].fillna("").astype(str).tolist()]
+    bs = getattr(cfg, "hf_batch_size", 16)
+    sc_lists = _hf_generate(model, tok, [SOLVE_PROMPT.format(q=q) for q in queries],
+                            cfg.llm_k_samples, cfg.llm_max_new_tokens, True, cfg.llm_temperature, bs)
+    judge_lists = _hf_generate(model, tok, [JUDGE_PROMPT.format(q=q) for q in queries],
+                               1, 64, False, 0.0, bs)
+    judge_texts = [g[0] if g else "" for g in judge_lists]
+    return sc_lists, judge_texts
+
+
+def compute_llm_features(cfg, df: pd.DataFrame, split: str, backend: str = "vllm") -> pd.DataFrame:
+    """Difficulty features per query. backend='vllm' (fast, needs matching CUDA) or 'hf'
+    (transformers; rides on Colab's existing torch, no CUDA matching). Cached to parquet."""
+    cache = cfg.cache_dir / f"llm_feats_{split}_{len(df)}.parquet"
+    if cache.exists():
+        return pd.read_parquet(cache)
+    sc_lists, judge_texts = (_compute_hf if backend == "hf" else _compute_vllm)(cfg, df)
+    out = _features_frame(sc_lists, judge_texts)
     out.to_parquet(cache)
     return out
