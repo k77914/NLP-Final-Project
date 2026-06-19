@@ -23,8 +23,23 @@ def old_folds(n, seed=42, n_splits=5):
     return [(tr, va) for tr, va in KFold(n_splits, shuffle=True, random_state=seed).split(np.arange(n))]
 
 
+def _old_dir(cfg, marker="weighted_ensemble_best_oof_predictions.npz"):
+    """Locate the validated-artifacts directory (its name varies: router_a100_full,
+    router_a100_exact_metric_v2, ...). Returns the dir containing the marker npz."""
+    out = cfg.root / "Output"
+    for name in ("router_a100_full", "router_a100_exact_metric_v2", "router_a100"):
+        if (out / name / marker).exists():
+            return out / name
+    hits = sorted(out.rglob(marker))
+    if hits:
+        return hits[0].parent
+    raise FileNotFoundError(
+        f"Validated artifacts ({marker}) not found under {out}. "
+        "Copy the old run's *_predictions.npz dir (e.g. router_a100_exact_metric_v2) there.")
+
+
 def load_old_member(cfg, name="weighted_ensemble_best"):
-    d = cfg.root / "Output" / "router_a100_full"
+    d = _old_dir(cfg)
     oof = np.load(d / f"{name}_oof_predictions.npz")["scores"].astype(np.float64)
     test = np.load(d / f"{name}_test_predictions.npz")["scores"].astype(np.float64)
     return oof, test
