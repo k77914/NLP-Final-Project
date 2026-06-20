@@ -1,0 +1,2 @@
+candidate,weights,fallback_quantile,threshold,oof_reward,test_changes_vs_public_best_q05,test_model_K_count,test_distribution
+submission_candidate_weights_065_025_005_005_q05.csv,"{""tfidf_ridge"": 0.65, ""qwen3_embedding_ridge"": 0.25, ""qwen3_embedding_lgbm"": 0.05, ""qwen3_embedding_lgbm_two_head"": 0.05}",0.05,0.002064896970987365,0.4787152645156491,168,959,"{""Model_K"": 959, ""Model_H"": 549, ""Model_F"": 330, ""Model_B"": 212, ""Model_D"": 212, ""Model_J"": 107, ""Model_I"": 66, ""Model_C"": 44, ""Model_G"": 33, ""Model_A"": 22, ""Model_E"": 16}"

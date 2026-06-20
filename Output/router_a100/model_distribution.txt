@@ -1,0 +1,15 @@
+Model distribution for Output/router_a100/submission.csv
+Total rows: 2550
+
+model,count,percent
+Model_A,3,0.1176%
+Model_B,26,1.0196%
+Model_C,223,8.7451%
+Model_D,548,21.4902%
+Model_E,47,1.8431%
+Model_F,187,7.3333%
+Model_G,28,1.0980%
+Model_H,41,1.6078%
+Model_I,98,3.8431%
+Model_J,242,9.4902%
+Model_K,1107,43.4118%

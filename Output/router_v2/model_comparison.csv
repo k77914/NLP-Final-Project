@@ -1,0 +1,7 @@
+method,oof_reward
+selection_fit_k_margin(m=0.010),0.46528684615867455
+"blend_argmax_w=[0.5, 0.5]",0.46478854102933315
+linear_solo,0.463928184144725
+policy_crossfit_estimate,0.4631148657339254
+lgbm_solo,0.45168278334560225
+always_K,0.4503763327136715
