@@ -54,6 +54,7 @@ class CFG:
     llm_max_new_tokens: int = 1024
     llm_temperature: float = 0.8
     hf_batch_size: int = 16  # batch size for the transformers (non-vLLM) generation backend
+    drive_cache: str | None = None  # if set, mirror expensive caches (encoder) here as written (disconnect resilience)
 
     @property
     def data_dir(self) -> Path:

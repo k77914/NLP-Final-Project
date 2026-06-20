@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json
+import shutil
 import time
 import numpy as np
 import pandas as pd
@@ -148,17 +149,25 @@ def run_combined(cfg: CFG, gate_margin=0.002):
 
     # Encoder member (utility, optionally + LLM feats)
     from . import models_encoder as me
+    # NOTE: compute the final-cache tag WITHOUT setting _encoder_uses_feats, so it stays
+    # "util_..." (matches predictions saved by earlier runs); fold caches use "utilf_..." internally.
     etag = me.cache_tag(cfg, len(train))
     eo_p, et_p = cfg.cache_dir / f"enc_oof_{etag}.npy", cfg.cache_dir / f"enc_test_{etag}.npy"
+    dc = getattr(cfg, "drive_cache", None)
     if (not cfg.smoke) and eo_p.exists() and et_p.exists():
         _log("encoder predictions loaded from cache")
         enc_oof, enc_test = np.load(eo_p), np.load(et_p)
     else:
         _log("training utility encoder (5 folds + full-fit)...")
         ts = time.time()
-        enc_oof, enc_test = me.encoder_oof_and_test(cfg, train, test, Y, folds, feats_tr, feats_te)
+        enc_oof, enc_test = me.encoder_oof_and_test(cfg, train, test, Y, folds, feats_tr,
+                                                    feats_te, drive_cache=dc)
         if not cfg.smoke:
             np.save(eo_p, enc_oof); np.save(et_p, enc_test)
+            if dc:
+                Path(dc).mkdir(parents=True, exist_ok=True)
+                shutil.copy(eo_p, Path(dc) / eo_p.name); shutil.copy(et_p, Path(dc) / et_p.name)
+                _log("mirrored encoder predictions to Drive cache")
         _log(f"encoder done ({time.time() - ts:.0f}s)")
     members_oof.append(enc_oof.astype(np.float64)); members_test.append(enc_test.astype(np.float64))
     names.append("encoder")

@@ -1,5 +1,7 @@
 from __future__ import annotations
 import gc
+import shutil
+from pathlib import Path
 import numpy as np
 import pandas as pd
 
@@ -121,13 +123,21 @@ def _train_predict(cfg, train_texts, Y, eval_texts, feats_tr=None, feats_eval=No
     return out
 
 
-def encoder_oof_and_test(cfg, train_df, test_df, Y, folds, feats_tr=None, feats_te=None):
+def encoder_oof_and_test(cfg, train_df, test_df, Y, folds, feats_tr=None, feats_te=None,
+                         drive_cache=None):
     """5-fold OOF + full-fit test utility predictions, checkpointed per fold. Y is the (N,11)
-    utility target; feats_* are optional per-row LLM difficulty features (already scaled)."""
+    utility target; feats_* are optional per-row LLM features (already scaled). If drive_cache
+    is set, each checkpoint is mirrored there as written (survives a runtime disconnect)."""
     cfg._encoder_uses_feats = feats_tr is not None
     texts = train_df["query"].fillna("").astype(str).tolist()
     te_texts = test_df["query"].fillna("").astype(str).tolist()
     etag = cache_tag(cfg, len(train_df))
+
+    def _mirror(p):
+        if drive_cache:
+            Path(drive_cache).mkdir(parents=True, exist_ok=True)
+            shutil.copy(p, Path(drive_cache) / Path(p).name)
+
     oof = np.zeros_like(Y, dtype=np.float32)
     for i, (tr, va) in enumerate(folds, 1):
         fp = cfg.cache_dir / f"enc_fold{i}_{etag}.npz"
@@ -143,6 +153,7 @@ def encoder_oof_and_test(cfg, train_df, test_df, Y, folds, feats_tr=None, feats_
         oof[va] = pred
         if not cfg.smoke:
             np.savez(fp, va=va, pred=pred)
+            _mirror(fp)
     tfp = cfg.cache_dir / f"enc_testfull_{etag}.npy"
     if tfp.exists():
         print("[encoder] test full-fit loaded from cache", flush=True)
@@ -152,4 +163,5 @@ def encoder_oof_and_test(cfg, train_df, test_df, Y, folds, feats_tr=None, feats_
         test_pred = _train_predict(cfg, texts, Y, te_texts, feats_tr, feats_te)
         if not cfg.smoke:
             np.save(tfp, test_pred)
+            _mirror(tfp)
     return oof, test_pred
